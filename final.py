@@ -1,157 +1,131 @@
-import RPi.GPIO as GPIO
 import cv2
+import mediapipe as mp
 import numpy as np
 import time
+import RPi.GPIO as GPIO
 
-# GPIO Setup
+# Initialize Mediapipe Face Mesh for facial landmarks detection
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.7)
+
+# Setup GPIO for motor control
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-# Motor pins
-IN1, IN2 = 17, 27  # Motor 1 (Horizontal)
-IN3, IN4 = 22, 23  # Motor 2 (Vertical)
-IN5, IN6 = 24, 25  # Motor 3 (Tilt)
-
+# Motor control pins
+IN1, IN2 = 17, 27  # Horizontal motor
+IN3, IN4 = 22, 23  # Vertical motor
+IN5, IN6 = 5, 6    # Tilt motor
 motor_pins = [IN1, IN2, IN3, IN4, IN5, IN6]
 
+# Set all motor pins as output
 for pin in motor_pins:
     GPIO.setup(pin, GPIO.OUT)
     GPIO.output(pin, GPIO.LOW)
 
 # Motor control functions
-def motor_forward(in1, in2, duration):
+def motor_forward(in1, in2, duration=0.5):
     GPIO.output(in1, GPIO.HIGH)
     GPIO.output(in2, GPIO.LOW)
     time.sleep(duration)
     GPIO.output(in1, GPIO.LOW)
     GPIO.output(in2, GPIO.LOW)
 
-def motor_reverse(in1, in2, duration):
+def motor_reverse(in1, in2, duration=0.5):
     GPIO.output(in1, GPIO.LOW)
     GPIO.output(in2, GPIO.HIGH)
     time.sleep(duration)
     GPIO.output(in1, GPIO.LOW)
     GPIO.output(in2, GPIO.LOW)
 
-# DNN Face Detection Setup
-prototxt_path = "deploy.prototxt.txt"
-model_path = "res10_300x300_ssd_iter_140000.caffemodel"
-face_detector = cv2.dnn.readNetFromCaffe(prototxt_path, model_path)
+# Camera setup
+camera = cv2.VideoCapture(0)
+frame_width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-# Webcam initialization
-cap = cv2.VideoCapture(0)
-movement_threshold = 50
-screen_center_x, screen_center_y = 0, 0
+# Flag to track automation state
+automation_running = False
 
-# Tilt calculation function
-def calculate_tilt(face_box, frame):
-    (startX, startY, endX, endY) = face_box
-    face_roi = frame[startY:endY, startX:endX]
-    gray_face = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
-    face_width = endX - startX
-    left_half = gray_face[:, :face_width // 2]
-    right_half = gray_face[:, face_width // 2:]
-    left_brightness = np.mean(left_half)
-    right_brightness = np.mean(right_half)
+# Function to count fingers
+def count_fingers(hand_landmarks):
+    fingers = [
+        1 if hand_landmarks[mp_hands.HandLandmark.THUMB_TIP].x < hand_landmarks[mp_hands.HandLandmark.THUMB_IP].x else 0
+    ]
+    for tip_id, dip_id in [
+        (mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.INDEX_FINGER_DIP),
+        (mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_DIP),
+        (mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.RING_FINGER_DIP),
+        (mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.PINKY_DIP)
+    ]:
+        fingers.append(1 if hand_landmarks[tip_id].y < hand_landmarks[dip_id].y else 0)
+    return fingers.count(1)
 
-    if left_brightness > right_brightness + 10:
-        return "Tilted Left"
-    elif right_brightness > left_brightness + 10:
-        return "Tilted Right"
-    else:
-        return "Neutral"
+# Function to calculate and control motors
+def calculate_face_orientation_and_dof(landmarks):
+    left_eye = np.array([landmarks[33].x * frame_width, landmarks[33].y * frame_height])
+    right_eye = np.array([landmarks[263].x * frame_width, landmarks[263].y * frame_height])
+    chin = np.array([landmarks[152].x * frame_width, landmarks[152].y * frame_height])
 
-# Movement detection function
-def detect_movement(face_box):
-    global screen_center_x, screen_center_y
-    (startX, startY, endX, endY) = face_box
-    face_center_x = (startX + endX) // 2
-    face_center_y = (startY + endY) // 2
+    eye_midpoint = (left_eye + right_eye) / 2
+    vertical_midpoint = (eye_midpoint + chin) / 2
 
-    if face_center_x < screen_center_x - movement_threshold:
-        horizontal = "Left"
-    elif face_center_x > screen_center_x + movement_threshold:
-        horizontal = "Right"
-    else:
-        horizontal = "Center"
+    delta_x = right_eye[0] - left_eye[0]
+    delta_y = right_eye[1] - left_eye[1]
+    roll_angle = np.degrees(np.arctan2(delta_y, delta_x))
 
-    if face_center_y < screen_center_y - movement_threshold:
-        vertical = "Up"
-    elif face_center_y > screen_center_y + movement_threshold:
-        vertical = "Down"
-    else:
-        vertical = "Center"
+    frame_center_x, frame_center_y = frame_width // 2, frame_height // 2
+    horizontal_displacement = vertical_midpoint[0] - frame_center_x
+    vertical_displacement = vertical_midpoint[1] - frame_center_y
 
-    return horizontal, vertical
+    if automation_running:
+        if horizontal_displacement > 40:
+            motor_forward(IN1, IN2)
+        elif horizontal_displacement < -40:
+            motor_reverse(IN1, IN2)
+        
+        if vertical_displacement > 50:
+            motor_forward(IN3, IN4)
+        elif vertical_displacement < -50:
+            motor_reverse(IN3, IN4)
+        
+        if roll_angle > 10:
+            motor_forward(IN5, IN6)
+        elif roll_angle < -10:
+            motor_reverse(IN5, IN6)
 
-# Initialize screen center
-ret, frame = cap.read()
-if ret:
-    screen_center_x = frame.shape[1] // 2
-    screen_center_y = frame.shape[0] // 2
+while True:
+    ret, frame = camera.read()
+    if not ret:
+        break
 
-try:
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to capture video.")
-            break
+    frame = cv2.flip(frame, 1)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb_frame)
+    hand_results = hands.process(rgb_frame)
 
-        (h, w) = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-        face_detector.setInput(blob)
-        detections = face_detector.forward()
+    if hand_results.multi_hand_landmarks:
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            fingers_up = count_fingers(hand_landmarks.landmark)
+            if fingers_up == 5:
+                automation_running = True
+                print("Automation Started")
+            elif fingers_up == 0:
+                automation_running = False
+                print("Automation Stopped")
 
-        for i in range(0, detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            calculate_face_orientation_and_dof(face_landmarks.landmark)
 
-            if confidence > 0.5:
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                (startX, startY, endX, endY) = box.astype("int")
-                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-                # Detect tilt and movement
-                tilt_status = calculate_tilt((startX, startY, endX, endY), frame)
-                horizontal, vertical = detect_movement((startX, startY, endX, endY))
-
-                # Control motors based on movement
-                if horizontal == "Left":
-                    motor_forward(IN1, IN2, 0.1)
-                elif horizontal == "Right":
-                    motor_reverse(IN1, IN2, 0.1)
-
-                if vertical == "Up":
-                    motor_forward(IN3, IN4, 0.1)
-                elif vertical == "Down":
-                    motor_reverse(IN3, IN4, 0.1)
-
-                if tilt_status == "Tilted Left":
-                    motor_forward(IN5, IN6, 0.1)
-                elif tilt_status == "Tilted Right":
-                    motor_reverse(IN5, IN6, 0.1)
-
-                # Display status
-                cv2.putText(frame, f"Tilt: {tilt_status}", (startX, startY - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                cv2.putText(frame, f"Horizontal: {horizontal}", (startX, startY - 45),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                cv2.putText(frame, f"Vertical: {vertical}", (startX, startY - 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-                print(f"Movement: Horizontal: {horizontal}, Vertical: {vertical}, Tilt: {tilt_status}")
-
-        # Show the frame
-        cv2.imshow("Face Detection and Tracking", frame)
-
-        # Press 'q' to exit
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-except KeyboardInterrupt:
-    print("Exiting program.")
-
-finally:
-    # Cleanup
-    cap.release()
-    cv2.destroyAllWindows()
-    GPIO.cleanup()
+camera.release()
+cv2.destroyAllWindows()
+GPIO.cleanup()
