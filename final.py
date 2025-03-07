@@ -18,9 +18,9 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
 # Motor control pins
-IN1, IN2 = 17, 27  # Horizontal motor
-IN3, IN4 = 22, 23  # Vertical motor
-IN5, IN6 = 5, 6    # Tilt motor
+IN1, IN2 =  22, 23  # Motor 1 (Horizontal)
+IN3, IN4 =  24, 25 # Motor 2 (Vertical)
+IN5, IN6 = 17,27  # Motor 3 (Tilt)
 motor_pins = [IN1, IN2, IN3, IN4, IN5, IN6]
 
 # Set all motor pins as output
@@ -82,21 +82,7 @@ def calculate_face_orientation_and_dof(landmarks):
     horizontal_displacement = vertical_midpoint[0] - frame_center_x
     vertical_displacement = vertical_midpoint[1] - frame_center_y
 
-    if automation_running:
-        if horizontal_displacement > 40:
-            motor_forward(IN1, IN2)
-        elif horizontal_displacement < -40:
-            motor_reverse(IN1, IN2)
-        
-        if vertical_displacement > 50:
-            motor_forward(IN3, IN4)
-        elif vertical_displacement < -50:
-            motor_reverse(IN3, IN4)
-        
-        if roll_angle > 10:
-            motor_forward(IN5, IN6)
-        elif roll_angle < -10:
-            motor_reverse(IN5, IN6)
+    return horizontal_displacement,vertical_displacement,roll_angle
 
 while True:
     ret, frame = camera.read()
@@ -121,7 +107,28 @@ while True:
 
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
-            calculate_face_orientation_and_dof(face_landmarks.landmark)
+            horizontal_displacement,vertical_displacement,roll_angle= calculate_face_orientation_and_dof(face_landmarks.landmark)
+            if automation_running:
+                if horizontal_displacement > 40:
+                    print('horizontal:Right')
+                    motor_forward(IN1, IN2, 0.035)
+                elif horizontal_displacement < -40:
+                    print('horizontal:Left')
+                    motor_reverse(IN1, IN2,0.035)
+                
+                if vertical_displacement > 50:
+                    print('vertical:Up')
+                    motor_forward(IN3, IN4, 0.035)
+                elif vertical_displacement < -50:
+                    print('vertical:Down')
+                    motor_reverse(IN3, IN4, 0.035)
+                
+                if roll_angle > 10:
+                    print('roll:Tilt right')
+                    motor_forward(IN5, IN6, 0.035)
+                elif roll_angle < -10:
+                    print('roll:Tilt left')
+                    motor_reverse(IN5, IN6, 0.035)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
